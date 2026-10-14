@@ -166,7 +166,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<bool> _upload(FtpSettings s, File file, String lang) async {
-    final ftp = FTPConnect(
+    final sftp = SFTPConnect(
       s.host,
       port: s.port,
       user: s.user,
@@ -174,15 +174,15 @@ class _HomePageState extends State<HomePage> {
       timeout: 30,
     );
     try {
-      if (!await ftp.connect()) return false;
-      await ftp.setTransferType(TransferType.binary);
+      if (!await sftp.connect()) return false;
+      //await sftp.setTransferType(TransferType.binary);
       final remoteDir = s.folderFor(lang)!;
-      if (!await ftp.createFolderIfNotExist(remoteDir)) return false;
-      if (!await ftp.changeDirectory(remoteDir)) return false;
-      return await ftp.uploadFile(file, sRemoteName: p.basename(file.path));
+      //if (!await sftp.createFolderIfNotExist(remoteDir)) return false;
+      if (!await sftp.changeDirectory(remoteDir)) return false;
+      return await sftp.uploadFile(file, sRemoteName: p.basename(file.path));
     } finally {
       try {
-        await ftp.disconnect();
+        await sftp.disconnect();
       } catch (_) {}
     }
   }

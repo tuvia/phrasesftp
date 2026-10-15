@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:ftpconnect/ftpconnect.dart';
-import 'package:path/path.dart' as p;
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -15,16 +15,24 @@ class PhrasesFtpApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Phrases FTP',
+      title: 'Phrases SFTP',
       theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
       home: const HomePage(),
     );
   }
 }
 
-/// Reemplaza el primer guión "-" del nombre de archivo por un guión bajo "_".
-/// Ej.: "IMG-20261014-WA0001.jpg" -> "IMG_20261014-WA0001.jpg"
-String renameFirstDash(String fileName) => fileName.replaceFirst('-', '_');
+/// Nombre remoto del archivo según la fecha: IMG_AAAAMMDD-hhmmss.jpg.
+/// Ej.: 14/10/2026 10:34:56 -> "IMG_20261014-103456.jpg"
+String remoteFileName(DateTime date) {
+  final y = date.year.toString().padLeft(4, '0');
+  final m = date.month.toString().padLeft(2, '0');
+  final d = date.day.toString().padLeft(2, '0');
+  final h = date.hour.toString().padLeft(2, '0');
+  final min = date.minute.toString().padLeft(2, '0');
+  final s = date.second.toString().padLeft(2, '0');
+  return 'IMG_$y$m$d-$h$min$s.jpg';
+}
 
 const languages = ['es', 'en', 'pt'];
 
@@ -40,7 +48,7 @@ class FtpSettings {
 
   FtpSettings({
     this.host = '',
-    this.port = 21,
+    this.port = 22,
     this.user = '',
     this.password = '',
     Map<String, String>? folders,
@@ -58,7 +66,7 @@ class FtpSettings {
     final prefs = await SharedPreferences.getInstance();
     return FtpSettings(
       host: prefs.getString('ftp_host') ?? '',
-      port: prefs.getInt('ftp_port') ?? 21,
+      port: prefs.getInt('ftp_port') ?? 22,
       user: prefs.getString('ftp_user') ?? '',
       password: prefs.getString('ftp_password') ?? '',
       folders: {
@@ -93,6 +101,10 @@ class _HomePageState extends State<HomePage> {
   String? _language;
   bool _uploading = false;
 
+  /// Mensaje de resultado mostrado abajo de la pantalla (verde/rojo).
+  String? _status;
+  bool _statusOk = false;
+
   @override
   void initState() {
     super.initState();
@@ -115,17 +127,10 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _onShared(List<SharedMediaFile> files) async {
     if (files.isEmpty) return;
-    final original = File(files.first.path);
-    final newName = renameFirstDash(p.basename(original.path));
-    final renamed = await original.copy(p.join(original.parent.path, newName));
-    if (renamed.path != original.path) {
-      try {
-        await original.delete();
-      } catch (_) {}
-    }
     setState(() {
-      _file = renamed;
+      _file = File(files.first.path);
       _language = null;
+      _status = null;
     });
   }
 
@@ -134,38 +139,48 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _language = lang;
       _uploading = true;
+      _status = null;
     });
 
     final settings = await FtpSettings.load();
     String message;
     bool ok = false;
     if (!settings.isComplete) {
-      message = 'Configura el servidor FTP primero (icono ⚙).';
+      message = 'Configura el servidor SFTP primero (icono ⚙).';
     } else if (settings.folderFor(lang) == null) {
-      message = 'Configura la carpeta FTP para "$lang" (icono ⚙).';
+      message = 'Configura la carpeta SFTP para "$lang" (icono ⚙).';
     } else {
       try {
-        ok = await _upload(settings, _file!, lang);
+        final remoteName = remoteFileName(DateTime.now());
+        ok = await _upload(settings, _file!, lang, remoteName);
         message = ok
-            ? 'Archivo ${p.basename(_file!.path)} subido a ${settings.folderFor(lang)} con éxito'
-            : 'Falló la transferencia FTP';
+            ? 'Archivo $remoteName subido a ${settings.folderFor(lang)} con éxito'
+            : 'Falló la transferencia SFTP';
       } catch (e) {
-        message = 'Falló la transferencia FTP: $e';
+        message = 'Falló la transferencia SFTP: $e';
       }
     }
 
     if (!mounted) return;
-    setState(() => _uploading = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: ok ? Colors.green[700] : Colors.red[700],
-        duration: const Duration(seconds: 4),
-      ),
-    );
+    setState(() {
+      _uploading = false;
+      _status = message;
+      _statusOk = ok;
+    });
+
+    // Transferencia exitosa: se muestra el mensaje un momento y la app se cierra.
+    if (ok) {
+      await Future.delayed(const Duration(seconds: 2));
+      await SystemNavigator.pop();
+    }
   }
 
-  Future<bool> _upload(FtpSettings s, File file, String lang) async {
+  Future<bool> _upload(
+    FtpSettings s,
+    File file,
+    String lang,
+    String remoteName,
+  ) async {
     final sftp = SFTPConnect(
       s.host,
       port: s.port,
@@ -179,7 +194,7 @@ class _HomePageState extends State<HomePage> {
       final remoteDir = s.folderFor(lang)!;
       //if (!await sftp.createFolderIfNotExist(remoteDir)) return false;
       if (!await sftp.changeDirectory(remoteDir)) return false;
-      return await sftp.uploadFile(file, sRemoteName: p.basename(file.path));
+      return await sftp.uploadFile(file, sRemoteName: remoteName);
     } finally {
       try {
         await sftp.disconnect();
@@ -191,17 +206,33 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Phrases FTP'),
+        title: const Text('Phrases SFTP'),
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
-            tooltip: 'Configuración FTP',
+            tooltip: 'Configuración SFTP',
             onPressed: () => Navigator.of(context)
                 .push(MaterialPageRoute(builder: (_) => const SettingsPage())),
           ),
         ],
       ),
       body: _file == null ? _buildEmpty() : _buildShared(),
+      bottomNavigationBar: _status == null ? null : _buildStatus(),
+    );
+  }
+
+  Widget _buildStatus() {
+    return Container(
+      color: _statusOk ? Colors.green[700] : Colors.red[700],
+      padding: const EdgeInsets.all(16),
+      child: SafeArea(
+        top: false,
+        child: Text(
+          _status!,
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: Colors.white, fontSize: 16),
+        ),
+      ),
     );
   }
 
@@ -211,7 +242,7 @@ class _HomePageState extends State<HomePage> {
         padding: EdgeInsets.all(24),
         child: Text(
           'Comparte una imagen desde WhatsApp (u otra app) '
-          'y elige "Phrases FTP".',
+          'y elige "Phrases SFTP".',
           textAlign: TextAlign.center,
         ),
       ),
@@ -228,7 +259,7 @@ class _HomePageState extends State<HomePage> {
         ),
         const SizedBox(height: 12),
         Text(
-          p.basename(_file!.path),
+          remoteFileName(DateTime.now()),
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.titleMedium,
         ),
@@ -299,7 +330,7 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _save() async {
     await FtpSettings(
       host: _host.text.trim(),
-      port: int.tryParse(_port.text.trim()) ?? 21,
+      port: int.tryParse(_port.text.trim()) ?? 22,
       user: _user.text.trim(),
       password: _password.text,
       folders: {
@@ -315,7 +346,7 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Configuración FTP')),
+      appBar: AppBar(title: const Text('Configuración SFTP')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -340,7 +371,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 24),
           Text(
-            'Carpeta FTP de cada idioma',
+            'Carpeta SFTP de cada idioma',
             style: Theme.of(context).textTheme.titleMedium,
           ),
           for (final lang in languages)
